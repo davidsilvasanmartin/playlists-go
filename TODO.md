@@ -1,0 +1,1 @@
+- pgx as DB driver; sqlc to write Go code based on queries; Goose for migrations.
