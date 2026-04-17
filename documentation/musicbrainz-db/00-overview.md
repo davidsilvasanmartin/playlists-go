@@ -123,8 +123,8 @@ CREATE EXTENSION IF NOT EXISTS "earthdistance";
 
 ## Next Steps
 
-- [Core Entities](./01-core-entities.md) - Understand the main data structures
-- [Schema Structure](./02-schema-structure.md) - Detailed table organization
-- [Relationships](./03-relationships.md) - How entities connect
-- [Querying Guide](./04-querying-guide.md) - Common queries and patterns
+- [Core Entities](01-core-entities.md) - Understand the main data structures
+- [Schema Structure](02-schema-structure.md) - Detailed table organization
+- [Relationships](03-relationships.md) - How entities connect
+- [Querying Guide](04-querying-guide.md) - Common queries and patterns
 - [Replication](./05-replication.md) - Keeping data up-to-date
