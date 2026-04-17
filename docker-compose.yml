@@ -23,3 +23,15 @@ services:
       - database-data:/var/lib/postgresql/data
     networks:
       - app-network
+
+  swagger-ui:
+    image: "swaggerapi/swagger-ui:latest"
+    container_name: dev-davidsilva-apps-playlists-swagger
+    ports:
+      - "8081:8080"
+    environment:
+      # Points at the openapi.yaml served by the running Go server.
+      # Start the server first, then open http://localhost:8081
+      SWAGGER_JSON_URL: "http://localhost:8080/api/v1/openapi.yaml"
+    networks:
+      - app-network
