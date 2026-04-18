@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/davidsilvasanmartin/playlists-go/internal/musicbrainz"
+	"go.uber.org/zap"
 )
 
 // Service is the contract for the search business logic
@@ -12,16 +13,27 @@ type Service interface {
 }
 
 type service struct {
-	mb musicbrainz.Client
+	mb     musicbrainz.Client
+	logger *zap.Logger
 }
 
-func NewService(mb musicbrainz.Client) Service {
-	return &service{mb: mb}
+func NewService(mb musicbrainz.Client, logger *zap.Logger) Service {
+	return &service{mb: mb, logger: logger}
 }
 
 func (s *service) Search(ctx context.Context, title string, artist string) ([]Result, error) {
+	s.logger.Debug("service.Search called",
+		zap.String("title", title),
+		zap.String("artist", artist),
+	)
+
 	recordings, err := s.mb.Search(ctx, title, artist)
 	if err != nil {
+		s.logger.Error("MusicBrainz client returned an error",
+			zap.String("title", title),
+			zap.String("artist", artist),
+			zap.Error(err),
+		)
 		return nil, err
 	}
 
@@ -40,5 +52,10 @@ func (s *service) Search(ctx context.Context, title string, artist string) ([]Re
 		}
 	}
 
+	s.logger.Debug("service.Search returning results",
+		zap.String("title", title),
+		zap.String("artist", artist),
+		zap.Int("count", len(results)),
+	)
 	return results, nil
 }

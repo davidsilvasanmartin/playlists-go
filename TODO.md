@@ -1,1 +1,2 @@
 - pgx as DB driver; sqlc to write Go code based on queries; Goose for migrations.
+- Perhaps look into tools for validation such as https://github.com/go-playground/validator

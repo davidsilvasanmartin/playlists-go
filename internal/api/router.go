@@ -4,13 +4,15 @@ import (
 	"net/http"
 
 	"github.com/davidsilvasanmartin/playlists-go/internal/search"
+	"go.uber.org/zap"
 )
 
 // NewRouter builds and returns the application's HTTP mux with all routes registered
-func NewRouter(searchHandler *search.Handler) *http.ServeMux {
+// and middlewares applied
+func NewRouter(logger *zap.Logger, searchHandler *search.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/songs/search", searchHandler.Search)
 
-	return mux
+	return LoggingMiddleware(logger)(mux)
 }

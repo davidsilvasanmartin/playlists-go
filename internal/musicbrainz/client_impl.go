@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
@@ -16,21 +17,28 @@ type clientImpl struct {
 	limiter    *rate.Limiter
 	baseURL    string
 	userAgent  string
+	logger     *zap.Logger
 }
 
 // NewClient initializes and returns a new Client for interacting with the MusicBrainz API
-func NewClient(baseURL string, userAgent string) Client {
+func NewClient(baseURL string, userAgent string, logger *zap.Logger) Client {
 	return &clientImpl{
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		limiter:    rate.NewLimiter(rate.Every(time.Second), 1),
 		baseURL:    baseURL,
 		userAgent:  userAgent,
+		logger:     logger,
 	}
 }
 
 func (c *clientImpl) Search(ctx context.Context, title string, artist string) ([]Recording, error) {
+	c.logger.Debug("starting MusicBrainz search",
+		zap.String("title", title),
+		zap.String("artist", artist),
+	)
+
 	var result []Recording
-	err := withRetry(ctx, 3, 2*time.Second, func() error {
+	err := withRetry(ctx, 3, 2*time.Second, c.logger, func() error {
 		if err := c.limiter.Wait(ctx); err != nil {
 			return err
 		}
@@ -41,6 +49,12 @@ func (c *clientImpl) Search(ctx context.Context, title string, artist string) ([
 		result = recordings
 		return nil
 	})
+
+	c.logger.Debug("MusicBrainz search complete",
+		zap.String("title", title),
+		zap.String("artist", artist),
+		zap.Int("recordings", len(result)),
+	)
 	return result, err
 }
 
@@ -50,8 +64,11 @@ func (c *clientImpl) doSearch(ctx context.Context, title string, artist string) 
 	params := url.Values{
 		"query": []string{q},
 		"fmt":   []string{"json"},
+		"limit": []string{"100"},
 	}
 	endpoint := c.baseURL + "/ws/2/recording?" + params.Encode()
+
+	c.logger.Debug("sending HTTP request to MusicBrainz", zap.String("url", endpoint))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -103,7 +120,10 @@ func mapRecordings(raw []mbRecording) []Recording {
 	return out
 }
 
-func withRetry(ctx context.Context, maxAttempts int, delay time.Duration, fn func() error) error {
+// withRetry calls fn up to maxAttempts times, waiting delay between failures.
+// It logs each failed attempt and gives up after the last one, returning the
+// final error.  Context cancellation is respected between retries.
+func withRetry(ctx context.Context, maxAttempts int, delay time.Duration, logger *zap.Logger, fn func() error) error {
 	var err error = nil
 	for i := range maxAttempts {
 		err = fn()
@@ -111,6 +131,12 @@ func withRetry(ctx context.Context, maxAttempts int, delay time.Duration, fn fun
 			return nil
 		}
 		if i < maxAttempts-1 {
+			logger.Warn("MusicBrainz request failed, will retry",
+				zap.Int("attempt", i+1),
+				zap.Int("maxAttempts", maxAttempts),
+				zap.Error(err),
+				zap.Duration("retryIn", delay),
+			)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -118,5 +144,10 @@ func withRetry(ctx context.Context, maxAttempts int, delay time.Duration, fn fun
 			}
 		}
 	}
+
+	logger.Error("MusicBrainz request failed after all retry attempts",
+		zap.Int("attempts", maxAttempts),
+		zap.Error(err),
+	)
 	return err
 }
