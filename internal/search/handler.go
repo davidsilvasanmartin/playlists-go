@@ -38,7 +38,9 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results, err := h.service.Search(r.Context(), title, artist)
-	if err != nil {
+	if err == nil {
+		writeJSON(w, http.StatusOK, Response{Results: results})
+	} else {
 		h.logger.Error("search service error",
 			zap.String("title", title),
 			zap.String("artist", artist),
@@ -46,8 +48,6 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		)
 		writeError(w, r, http.StatusServiceUnavailable, "MusicBrainz API is currently unreachable. Please try again later")
 	}
-
-	writeJSON(w, http.StatusOK, Response{Results: results})
 }
 
 // RESPONSE HELPERS
