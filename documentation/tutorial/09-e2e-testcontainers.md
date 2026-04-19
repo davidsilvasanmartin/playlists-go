@@ -225,7 +225,109 @@ Click on there and select the schema `WireMock stub mapping`.
 
 ---
 
-## 9.8 The Go test code
+## 9.8 The version endpoint
+
+The e2e test suite uses `GET /api/v1/version` as its readiness probe — the condition Testcontainers polls before handing control to the tests. This section explains how to implement it and why it belongs in every production service.
+
+### Why a version endpoint?
+
+A readiness probe needs an endpoint that:
+
+- always returns 200 when the server is up,
+- touches no external dependencies (no database, no MusicBrainz),
+- is free to call thousands of times (load balancer health checks, k8s probes).
+
+Beyond tests, a version endpoint is useful in practice:
+
+- **Deployments.** After a rollout you can `curl /api/v1/version` on each instance to verify the new binary is running, without grepping logs or checking image tags.
+- **Debugging.** When a bug is reported you immediately know which build the reporter was on, without asking them to find a log line.
+- **Load balancer / k8s health checks.** Most platforms let you configure an HTTP path as the liveness or readiness probe. `/api/v1/version` (or a dedicated `/health`) is the right target — it answers in microseconds and never fails due to a downstream outage.
+- **Canary releases.** With multiple versions running simultaneously you can confirm traffic is routing to the right instances.
+
+### Where to add it
+
+The router lives in `internal/api/router.go`. `NewRouter` currently takes a `*search.Handler` and a `*zap.Logger`. The cleanest change is to also accept a `version string` and register an inline handler for it — the endpoint has no dependencies and no logic, so it does not need its own package or struct.
+
+```go
+// internal/api/router.go
+
+func NewRouter(logger *zap.Logger, searchHandler *search.Handler, version string) http.Handler {
+    type versionResponse struct {
+        Version string `json:"version"`
+    }
+    body, _ := json.Marshal(versionResponse{Version: version})
+
+    mux := http.NewServeMux()
+
+    mux.HandleFunc("GET /api/v1/version", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        w.Write(body)
+    })
+    mux.HandleFunc("GET /api/v1/songs/search", searchHandler.Search)
+
+    return LoggingMiddleware(logger)(mux)
+}
+```
+
+The response body is marshalled **once at startup**, not on every request. `json.Marshal` on a one-field struct is safe to call at init time and produces a fixed `[]byte` that all requests share.
+
+Add `"encoding/json"` to the import block in `router.go`.
+
+### Injecting the version string
+
+The version value should come from the build, not from the running binary's environment. The standard Go way is `-ldflags`:
+
+```bash
+go build -ldflags="-X main.version=1.4.2" ./cmd/server
+```
+
+This sets the package-level variable `version` in `package main` at link time, without touching source code. Declare it in `cmd/server/main.go`:
+
+```go
+// cmd/server/main.go
+
+// version is set at build time via -ldflags="-X main.version=<value>".
+// It defaults to "dev" for local builds that omit the flag.
+var version = "dev"
+```
+
+Then pass it through to `NewRouter`:
+
+```go
+// cmd/server/main.go — inside main()
+
+mux := api.NewRouter(logger, searchHandler, version)
+```
+
+In production, your Makefile or CI pipeline sets the flag. A common pattern is to use the Git tag or commit SHA:
+
+```makefile
+VERSION ?= $(shell git describe --tags --always --dirty)
+
+build:
+    go build -ldflags="-X main.version=$(VERSION)" -o bin/server ./cmd/server
+```
+
+`git describe --tags --always --dirty` produces values like `v1.4.2`, `v1.4.2-3-gabcdef0`, or `v1.4.2-dirty` depending on whether you are on a tag, ahead of one, or have uncommitted changes. `--always` ensures it falls back to a plain commit SHA if no tags exist yet.
+
+In the `Dockerfile`, pass it as a build argument:
+
+```dockerfile
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -ldflags="-X main.version=${VERSION}" \
+    -o /app/bin/server ./cmd/server
+```
+
+```bash
+docker build --build-arg VERSION=1.4.2 -t playlists:1.4.2 .
+```
+
+For the e2e tests you do not need to pass `VERSION` — the default `"dev"` is fine. The probe only checks that the server responds with 200; it does not assert on the version string.
+
+---
+
+## 9.9 The Go test code
 
 ### `e2e/network_test.go`
 
@@ -265,6 +367,7 @@ package e2e_test
 import (
     "context"
     "fmt"
+    "io"
     "net/http"
     "os"
     "path/filepath"
@@ -344,16 +447,19 @@ func startWireMock(ctx context.Context, networkName, testdataDir string) (testco
             // "wiremock" is the hostname other containers use to reach this one.
             networkName: {"wiremock"},
         },
-        // Mount the local YAML stubs and response files into the container.
+        // Copy the local YAML stubs and response files into the container before it starts.
         // WireMock reads /home/wiremock/mappings/ on startup.
-        Mounts: testcontainers.ContainerMounts{
+        // CopyFileToContainer handles directories automatically.
+        Files: []testcontainers.ContainerFile{
             {
-                Source: testcontainers.GenericBindMountSource{HostPath: mappingsDir},
-                Target: "/home/wiremock/mappings",
+                HostFilePath:      mappingsDir,
+                ContainerFilePath: "/home/wiremock/mappings",
+                FileMode:          0o755,
             },
             {
-                Source: testcontainers.GenericBindMountSource{HostPath: filesDir},
-                Target: "/home/wiremock/__files",
+                HostFilePath:      filesDir,
+                ContainerFilePath: "/home/wiremock/__files",
+                FileMode:          0o755,
             },
         },
         WaitingFor: wait.ForHTTP("/__admin/health").
@@ -386,8 +492,8 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
         FromDockerfile: testcontainers.FromDockerfile{
             Context:        projectRoot,
             Dockerfile:     "Dockerfile",
-            PrintBuildLog:  false, // set true to debug image build failures
-            KeepImage:      false, // do not reuse between runs
+            BuildLogWriter: io.Discard, // set to os.Stderr to debug image build failures
+            KeepImage:      false,      // do not reuse between runs
         },
         ExposedPorts: []string{"8080/tcp"},
         Networks:     []string{networkName},
@@ -397,12 +503,7 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
             "PLAYLISTS_LOG_LEVEL":    "error", // suppress logs during tests
             "PLAYLISTS_LOG_FORMAT":   "json",
         },
-        WaitingFor: wait.ForHTTP("/api/v1/songs/search").
-            WithQuery("title=probe&artist=probe").
-            WithStatusCodeMatcher(func(status int) bool {
-                // Any response means the server is up — 400 is fine, 503 is fine.
-                return status != 0
-            }).
+        WaitingFor: wait.ForHTTP("/api/v1/version").
             WithPort("8080").
             WithStartupTimeout(60 * time.Second),
     }
@@ -418,7 +519,7 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 
 > **`NetworkAliases`** — within the Docker network, `wiremock` resolves to the WireMock container's IP. When the app container calls `http://wiremock:8080/ws/2/recording`, it reaches WireMock. This is the DNS resolution inside a Docker network, not the public internet.
 
-> **`WaitingFor`** — Testcontainers polls this condition before handing control back to your test code. For WireMock we wait for its `/__admin/health` endpoint to return 200. For the app we accept any non-zero status code on the search endpoint, because the probe request is intentionally bad (title "probe" is too short) and will return 400 — but that 400 proves the server is running and processing requests.
+> **`WaitingFor`** — Testcontainers polls this condition before handing control back to your test code. For WireMock we wait for its `/__admin/health` endpoint to return 200. For the app we poll `/api/v1/version`, which is a dependency-free endpoint that always returns 200 — no WireMock interaction, no ambiguity about what status code to expect. This is why a `/version` (or `/health`) endpoint is worth adding to every service: it gives infrastructure tooling a clean, always-cheap liveness signal.
 
 ### `e2e/search_test.go`
 
@@ -493,7 +594,7 @@ Notice how clean the tests are. There is no mock setup code at all — the routi
 
 ---
 
-## 9.9 Adding PostgreSQL (when you need it)
+## 9.10 Adding PostgreSQL (when you need it)
 
 When the app gains a database, add a third container to `TestMain`. You do not need to change the test files at all.
 
@@ -545,7 +646,7 @@ The database is created from scratch and seeded from your SQL files every time `
 
 ---
 
-## 9.10 Makefile
+## 9.11 Makefile
 
 ```makefile
 .PHONY: teste2e
@@ -571,7 +672,7 @@ teste2e:
 
 ---
 
-## 9.11 CI pipeline
+## 9.12 CI pipeline
 
 Because Testcontainers only needs Docker (not Docker Compose, not a running database service), your CI config is simple. Example for GitHub Actions:
 
@@ -597,7 +698,7 @@ That is the entire CI config. No `services:` block, no `docker-compose up`, no w
 
 ---
 
-## 9.12 Honest assessment: pros and cons
+## 9.13 Honest assessment: pros and cons
 
 ### What this approach does well
 
@@ -612,12 +713,12 @@ That is the entire CI config. No `services:` block, no `docker-compose up`, no w
 - **Docker is required.** You cannot run `make teste2e` on a machine without Docker. This matters for contributors or CI environments where Docker is unavailable or restricted.
 - **Slower than all other options.** Building the Docker image takes 10–30 seconds. Starting three containers and waiting for readiness takes another 10–20 seconds. A full e2e run on a cold machine can take 60–90 seconds before the first test runs.
 - **WireMock's trigger-string pattern is a workaround.** Because all tests share one WireMock instance, different error scenarios need different request patterns to route to different stubs. This is workable but less elegant than Part 8's approach where each test sets its own handler directly. The alternative — resetting WireMock between tests via its `/__admin/mappings/reset` API — is possible but adds complexity.
-- **`FromDockerfile` rebuilds every run.** Without the pre-build step in section 9.9, the image is rebuilt from scratch on each `go test` call. This is safe but slow.
+- **`FromDockerfile` rebuilds every run.** Without the pre-build step in section 9.11, the image is rebuilt from scratch on each `go test` call. This is safe but slow.
 - **More moving parts.** Three containers, a Docker network, a Testcontainers version to manage, a WireMock image version to pin. Each is a dependency that can break.
 
 ---
 
-## 9.13 Comparison of all approaches
+## 9.14 Comparison of all approaches
 
 | | Unit + in-process integration (Part 5) | Option A: binary + Go mock (Part 8) | Option B: binary + Testcontainers (Part 8) | **This approach (Part 9)** |
 |---|---|---|---|---|

@@ -1,0 +1,25 @@
+{
+  "recordings": [
+    {
+      "id": "b1a9c0e2-0000-0000-0000-000000000001",
+      "title": "Bohemian Rhapsody",
+      "length": 354000,
+      "disambiguation": "studio recording",
+      "artist-credit": [
+        {
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen"
+          }
+        }
+      ],
+      "releases": [
+        {
+          "id": "1dc4c347-a1db-32aa-b14f-bc9cc507b843",
+          "title": "A Night at the Opera",
+          "date": "1975-11-21"
+        }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 .PHONY: run build test testint vet tidy help
+VERSION ?= $(shell git describe --tags --always --dirty)
 
 BINARY := bin/server
 
@@ -15,9 +16,9 @@ build:
 test:
 	go test ./...
 
-## testint: run unit + integration tests (no Docker required)
-testint:
-	go test -tags=integration -v -count=1 ./...
+## teste2e: run e2e tests (no Docker required)
+teste2e:
+	go test -tags=e2e -v -count=1 -timeout=120s ./e2e/...
 
 ## vet: run go vet
 vet:

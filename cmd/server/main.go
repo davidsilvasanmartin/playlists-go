@@ -13,6 +13,10 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// version is set at build time via -ldflags="-X main.version=<value>".
+// It defaults to "dev" for local builds that omit the flag.
+var version = "dev"
+
 func main() {
 	// -- config ----------------
 	// Load committed defaults first, then let .env override personal values
@@ -48,7 +52,7 @@ func main() {
 	searchHandler := search.NewHandler(searchService, logger)
 
 	// -- routing ----------------
-	mux := api.NewRouter(logger, searchHandler)
+	mux := api.NewRouter(logger, searchHandler, version)
 
 	// -- server ----------------
 	addr := ":" + port

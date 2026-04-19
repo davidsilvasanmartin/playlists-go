@@ -1,0 +1,8 @@
+request:
+  method: GET
+  urlPathPattern: /ws/2/recording
+  queryParameters:
+    query:
+      contains: "TRIGGER_503"
+response:
+  status: 503
