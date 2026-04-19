@@ -1,5 +1,5 @@
 # Dockerfile to run the app in a Production-like environment
-FROM golang:1.26-trixie
+FROM golang:1.26-trixie AS builder
 LABEL authors="github.com/davidsilvasanmartin"
 # The app's version. Use as `docker build --build-arg VERSION=1.4.2 -t playlists:1.4.2`
 ARG VERSION=dev

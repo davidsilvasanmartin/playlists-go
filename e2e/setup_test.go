@@ -15,6 +15,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// TODO PIN IMAGES TO A SHA, so that Docker does not download too many of them into my laptop
+// TODO find out how to debug
+
 // appURL is the base URL of the app container. Set once in TestMain, read by all tests
 var appURL string
 

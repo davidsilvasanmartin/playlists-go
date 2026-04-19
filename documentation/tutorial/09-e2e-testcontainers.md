@@ -66,13 +66,15 @@ WireMock is the most widely used HTTP mock server in the industry (originally fr
 
 ### 9.4.1 A Dockerfile
 
-The app container needs a Docker image. Since you do not have a `Dockerfile` yet, here is a minimal production-quality one to add at the project root:
+The app container needs a Docker image. Here is a minimal production-quality two-stage `Dockerfile` for the project root:
 
 ```dockerfile
-# syntax=docker/dockerfile:1
-
 # ── Stage 1: build ───────────────────────────────────────────────
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26-trixie AS builder
+
+LABEL authors="github.com/davidsilvasanmartin"
+# The app's version. Use as `docker build --build-arg VERSION=1.4.2 -t playlists:1.4.2`
+ARG VERSION=dev
 
 WORKDIR /app
 
@@ -81,20 +83,22 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build \
+    -ldflags="-X main.version=${VERSION}" \
+    -o /app/bin/server ./cmd/server
 
 # ── Stage 2: run ─────────────────────────────────────────────────
-# distroless has no shell, which reduces the attack surface.
-FROM gcr.io/distroless/static-debian12
+FROM debian:trixie-slim
 
 COPY --from=builder /app/bin/server /server
 
 ENTRYPOINT ["/server"]
 ```
 
-This is a two-stage build. The first stage compiles the binary inside a Go image. The second stage copies only the binary into a tiny image with no compiler, no shell, and no package manager. The resulting image is typically around 10 MB.
+This is a two-stage build. The first stage compiles the binary inside a Go image. The second stage copies only the binary into a slim runtime image with no compiler or build tools. The `VERSION` build argument is wired up here too — see section 9.8 for how that works.
 
-`CGO_ENABLED=0` produces a fully static binary — it links no C libraries, so it runs in the distroless image which has no libc.
+`CGO_ENABLED=0` produces a fully static binary that has no C library dependencies.
 
 ### 9.4.2 Go dependencies
 
@@ -310,14 +314,7 @@ build:
 
 `git describe --tags --always --dirty` produces values like `v1.4.2`, `v1.4.2-3-gabcdef0`, or `v1.4.2-dirty` depending on whether you are on a tag, ahead of one, or have uncommitted changes. `--always` ensures it falls back to a plain commit SHA if no tags exist yet.
 
-In the `Dockerfile`, pass it as a build argument:
-
-```dockerfile
-ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux \
-    go build -ldflags="-X main.version=${VERSION}" \
-    -o /app/bin/server ./cmd/server
-```
+In the `Dockerfile`, the `ARG VERSION=dev` and the `-ldflags` flag are already wired up in section 9.4.1. You only need to pass the argument at build time:
 
 ```bash
 docker build --build-arg VERSION=1.4.2 -t playlists:1.4.2 .
