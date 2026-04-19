@@ -11,11 +11,46 @@ Integration tests carry the `//go:build integration` tag so they are excluded fr
 
 ---
 
+## A quick primer for Go newcomers
+
+Before diving in, here are a few things that trip up people new to Go testing.
+
+### `require` vs `assert`
+
+Both come from `github.com/stretchr/testify`. The difference is what happens when a check fails:
+
+- **`assert`** marks the test as failed but continues running. Good for checking multiple things independently.
+- **`require`** marks the test as failed *and stops the test immediately*. Use this whenever continuing would be pointless or dangerous — for example, if `err` is not nil there is nothing useful to check on the result that follows.
+
+A rule of thumb: use `require` for preconditions (no error, non-nil slice, correct length) and `assert` for the individual field checks that follow.
+
+### White-box vs black-box test packages
+
+Go lets you choose between two package declarations for test files:
+
+- `package search` — same package as the code under test. You can access unexported identifiers (functions, types, variables). Called a *white-box* test.
+- `package search_test` — a separate package that imports `search` like any other consumer. You can only access exported identifiers. Called a *black-box* test.
+
+The unit tests in this project use white-box packages (`package musicbrainz`, `package search`) because they test unexported helpers or internal wiring. The integration test uses `package search_test` because it tests the handler as an external consumer would.
+
+### What is mocking?
+
+Unit tests are supposed to test *one thing in isolation*. The search `Service` depends on a `musicbrainz.Client` to fetch data. In a unit test we do not want to make real HTTP calls — they are slow, flaky, and require network access. Instead we replace the real client with a controlled stand-in.
+
+There are two ways to do this:
+
+- **Hand-written fake** — a small struct you write yourself that satisfies the interface. Simple, but you have to write the same boilerplate for every interface.
+- **Mock (testify/mock)** — a struct generated or written using `testify/mock`. It lets you declare *per-test* what calls to expect, what to return, and whether all expected calls were actually made. More powerful, and consistent across the codebase.
+
+This project uses `testify/mock`. After reading this section you will see how little code it actually requires.
+
+---
+
 ## 5.1 Unit tests — `internal/musicbrainz`
 
 ### `internal/musicbrainz/client_impl_test.go`
 
-Tests the two unexported helpers: `withRetry` and `mapRecordings`.
+These tests use `package musicbrainz` (white-box) so they can call the unexported helpers `withRetry` and `mapRecordings` directly. No mocking is needed here — both functions are pure logic with no external dependencies.
 
 ```go
 package musicbrainz
@@ -132,7 +167,87 @@ func TestMapRecordings_NoArtistOrRelease(t *testing.T) {
 
 ## 5.2 Unit tests — `internal/search`
 
-The service needs a fake `musicbrainz.Client`. We write it by hand — it's six lines and avoids pulling in a mock framework.
+The service depends on `musicbrainz.Client`. We mock it with `testify/mock` so each test controls exactly what the client returns.
+
+### Getting the mock dependency
+
+`testify/mock` is part of the `testify` module you already have, but it pulls in an indirect dependency (`stretchr/objx`) that may not be in your `go.sum` yet. Run this once after adding the mock import:
+
+```bash
+go mod tidy
+```
+
+### How `testify/mock` works
+
+There are three moving parts:
+
+1. **Define the mock struct.** Embed `mock.Mock` and implement the interface. Inside each method, call `m.Called(...)` — this records that the method was called and returns whatever you configured with `On`.
+
+2. **Configure expectations.** In each test, call `mbClient.On("MethodName", arg1, arg2).Return(value1, value2)`. `mock.Anything` is a wildcard that matches any value for a given argument — useful for `context.Context` which you rarely care to match precisely.
+
+3. **Assert expectations.** Call `mbClient.AssertExpectations(t)` at the end of each test. This fails the test if any `On(...)` call was never triggered, catching bugs where the code under test silently skips a dependency call it should have made.
+
+### The mock type
+
+```go
+// mockMBClient is a testify/mock implementation of musicbrainz.Client.
+type mockMBClient struct {
+    mock.Mock
+}
+
+func (m *mockMBClient) Search(ctx context.Context, title, artist string) ([]musicbrainz.Recording, error) {
+    args := m.Called(ctx, title, artist)
+    // args.Get(0) returns interface{}. We guard against nil before the
+    // type-assertion to avoid a panic in the error-path tests.
+    if args.Get(0) == nil {
+        return nil, args.Error(1)
+    }
+    return args.Get(0).([]musicbrainz.Recording), args.Error(1)
+}
+```
+
+This is the most important piece to understand, so let's go through it line by line.
+
+**`m.Called(ctx, title, artist)`**
+
+`Called` is a method provided by the embedded `mock.Mock`. It does two things at once:
+
+1. It records that `Search` was called with these specific arguments. This is how `AssertExpectations` later knows whether the call happened.
+2. It looks up the matching `On("Search", ...)` rule you registered in the test and returns the values you specified in `.Return(...)`, packaged into an `Arguments` value (assigned here to `args`).
+
+Think of it as the mock asking: "someone called Search — what did the test tell me to return for these arguments?"
+
+**`args` — what is it?**
+
+`args` is a value of type `mock.Arguments`, which is just a slice of `interface{}` (Go's way of saying "a value of any type"). Each slot in the slice corresponds to one return value from `.Return(...)`.
+
+So if in a test you wrote:
+```go
+mbClient.On("Search", mock.Anything, "Bohemian Rhapsody", "Queen").Return(recordings, nil)
+```
+then inside `Called`, `args` will be `[recordings, nil]` — index 0 is `recordings`, index 1 is `nil`.
+
+**`args.Get(0)` and `args.Error(1)`**
+
+Because `args` is a slice of `interface{}`, you need helpers to pull values back out:
+
+- `args.Get(n)` returns the value at index `n` as a plain `interface{}`. You then use a *type assertion* — the `.([]musicbrainz.Recording)` syntax — to convert it back to the concrete type you actually want. This is necessary because Go is statically typed; the compiler does not know what type is hiding inside an `interface{}` until you tell it.
+- `args.Error(n)` is a convenience method for the special case where the value is an `error`. It returns `nil` if the stored value is nil (which would panic with a plain type assertion), and returns the `error` otherwise.
+
+**The nil check and why it matters**
+
+When a test wants to simulate a failure it passes `nil` as the first return value:
+```go
+mbClient.On("Search", ...).Return(nil, errors.New("network error"))
+```
+
+At that point `args.Get(0)` holds a plain `nil` — not a `nil` of type `[]musicbrainz.Recording`, just a bare untyped `nil`. Trying to type-assert a bare `nil` to any concrete type panics at runtime. The guard:
+```go
+if args.Get(0) == nil {
+    return nil, args.Error(1)
+}
+```
+catches this before the assertion runs and returns a typed nil slice directly, which is safe and correct.
 
 ### `internal/search/service_test.go`
 
@@ -146,36 +261,42 @@ import (
 
     "github.com/davidsilvasanmartin/playlists-go/internal/musicbrainz"
     "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/mock"
     "github.com/stretchr/testify/require"
 )
 
-// fakeMBClient is a hand-written fake that satisfies musicbrainz.Client.
-type fakeMBClient struct {
-    recordings []musicbrainz.Recording
-    err        error
+// mockMBClient is a testify/mock implementation of musicbrainz.Client.
+type mockMBClient struct {
+    mock.Mock
 }
 
-func (f *fakeMBClient) Search(_ context.Context, _, _ string) ([]musicbrainz.Recording, error) {
-    return f.recordings, f.err
+func (m *mockMBClient) Search(ctx context.Context, title, artist string) ([]musicbrainz.Recording, error) {
+    args := m.Called(ctx, title, artist)
+    if args.Get(0) == nil {
+        return nil, args.Error(1)
+    }
+    return args.Get(0).([]musicbrainz.Recording), args.Error(1)
 }
 
 func TestService_Search_MapsResults(t *testing.T) {
-    fake := &fakeMBClient{
-        recordings: []musicbrainz.Recording{
-            {
-                MBID:           "mbid-001",
-                Title:          "Bohemian Rhapsody",
-                Artist:         "Queen",
-                ArtistMBID:     "artist-001",
-                Album:          "A Night at the Opera",
-                AlbumMBID:      "release-001",
-                ReleaseDate:    "1975-11-21",
-                DurationMs:     354000,
-                Disambiguation: "studio recording",
-            },
+    recordings := []musicbrainz.Recording{
+        {
+            MBID:           "mbid-001",
+            Title:          "Bohemian Rhapsody",
+            Artist:         "Queen",
+            ArtistMBID:     "artist-001",
+            Album:          "A Night at the Opera",
+            AlbumMBID:      "release-001",
+            ReleaseDate:    "1975-11-21",
+            DurationMs:     354000,
+            Disambiguation: "studio recording",
         },
     }
-    svc := NewService(fake)
+
+    mbClient := new(mockMBClient)
+    mbClient.On("Search", mock.Anything, "Bohemian Rhapsody", "Queen").Return(recordings, nil)
+
+    svc := NewService(mbClient)
 
     results, err := svc.Search(context.Background(), "Bohemian Rhapsody", "Queen")
     require.NoError(t, err)
@@ -191,23 +312,33 @@ func TestService_Search_MapsResults(t *testing.T) {
     assert.Equal(t, "1975-11-21", r.ReleaseDate)
     assert.Equal(t, 354000, r.DurationMs)
     assert.Equal(t, "studio recording", r.Disambiguation)
+
+    mbClient.AssertExpectations(t)
 }
 
 func TestService_Search_EmptyResults(t *testing.T) {
-    fake := &fakeMBClient{recordings: []musicbrainz.Recording{}}
-    svc := NewService(fake)
+    mbClient := new(mockMBClient)
+    mbClient.On("Search", mock.Anything, "Nonexistent Song", "No Artist").Return([]musicbrainz.Recording{}, nil)
+
+    svc := NewService(mbClient)
 
     results, err := svc.Search(context.Background(), "Nonexistent Song", "No Artist")
     require.NoError(t, err)
     assert.Empty(t, results)
+
+    mbClient.AssertExpectations(t)
 }
 
 func TestService_Search_PropagatesError(t *testing.T) {
-    fake := &fakeMBClient{err: errors.New("network error")}
-    svc := NewService(fake)
+    mbClient := new(mockMBClient)
+    mbClient.On("Search", mock.Anything, "Any Title", "Any Artist").Return(nil, errors.New("network error"))
+
+    svc := NewService(mbClient)
 
     _, err := svc.Search(context.Background(), "Any Title", "Any Artist")
     assert.Error(t, err)
+
+    mbClient.AssertExpectations(t)
 }
 ```
 
@@ -222,6 +353,21 @@ Test HTTP client → Handler → Service → musicbrainz.Client → fake MB serv
 ```
 
 No Docker, no database. The fake MusicBrainz server is an in-process `httptest.Server` that returns canned JSON. This tests JSON serialization, validation, URL routing, and error mapping end-to-end.
+
+### Build tags
+
+The line `//go:build integration` at the top of the file is a *build constraint*. It tells the Go toolchain: "only compile this file when the `integration` tag is explicitly passed." This keeps `go test ./...` (and therefore `make test`) fast by skipping these slower tests. They only run when you pass `-tags=integration` to the compiler, which `make testint` does for you.
+
+The constraint must be the very first line of the file, followed by a blank line. If there is anything before it, Go ignores it.
+
+### The `httptest` package
+
+`net/http/httptest` is part of Go's standard library. It provides two key helpers:
+
+- **`httptest.NewServer(handler)`** — starts a real HTTP server on a random local port and returns its URL. You can point any HTTP client at it. Call `defer server.Close()` to shut it down at the end of the test.
+- **`httptest.NewRecorder()`** — a fake `http.ResponseWriter` you can inspect after calling a handler directly, without starting a real server. Used in pure handler tests.
+
+The integration tests here use `httptest.NewServer` twice: once for the fake MusicBrainz API and once for the real application under test.
 
 ### `internal/search/handler_integration_test.go`
 

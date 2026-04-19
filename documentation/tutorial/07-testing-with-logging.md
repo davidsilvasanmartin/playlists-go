@@ -182,37 +182,43 @@ import (
 
     "github.com/davidsilvasanmartin/playlists-go/internal/musicbrainz"
     "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/mock"
     "github.com/stretchr/testify/require"
     "go.uber.org/zap"
 )
 
-// fakeMBClient is a hand-written fake that satisfies musicbrainz.Client.
-type fakeMBClient struct {
-    recordings []musicbrainz.Recording
-    err        error
+// mockMBClient is a testify/mock implementation of musicbrainz.Client.
+type mockMBClient struct {
+    mock.Mock
 }
 
-func (f *fakeMBClient) Search(_ context.Context, _, _ string) ([]musicbrainz.Recording, error) {
-    return f.recordings, f.err
+func (m *mockMBClient) Search(ctx context.Context, title, artist string) ([]musicbrainz.Recording, error) {
+    args := m.Called(ctx, title, artist)
+    if args.Get(0) == nil {
+        return nil, args.Error(1)
+    }
+    return args.Get(0).([]musicbrainz.Recording), args.Error(1)
 }
 
 func TestService_Search_MapsResults(t *testing.T) {
-    fake := &fakeMBClient{
-        recordings: []musicbrainz.Recording{
-            {
-                MBID:           "mbid-001",
-                Title:          "Bohemian Rhapsody",
-                Artist:         "Queen",
-                ArtistMBID:     "artist-001",
-                Album:          "A Night at the Opera",
-                AlbumMBID:      "release-001",
-                ReleaseDate:    "1975-11-21",
-                DurationMs:     354000,
-                Disambiguation: "studio recording",
-            },
+    recordings := []musicbrainz.Recording{
+        {
+            MBID:           "mbid-001",
+            Title:          "Bohemian Rhapsody",
+            Artist:         "Queen",
+            ArtistMBID:     "artist-001",
+            Album:          "A Night at the Opera",
+            AlbumMBID:      "release-001",
+            ReleaseDate:    "1975-11-21",
+            DurationMs:     354000,
+            Disambiguation: "studio recording",
         },
     }
-    svc := NewService(fake, zap.NewNop())
+
+    mbClient := new(mockMBClient)
+    mbClient.On("Search", mock.Anything, "Bohemian Rhapsody", "Queen").Return(recordings, nil)
+
+    svc := NewService(mbClient, zap.NewNop())
 
     results, err := svc.Search(context.Background(), "Bohemian Rhapsody", "Queen")
     require.NoError(t, err)
@@ -228,27 +234,37 @@ func TestService_Search_MapsResults(t *testing.T) {
     assert.Equal(t, "1975-11-21", r.ReleaseDate)
     assert.Equal(t, 354000, r.DurationMs)
     assert.Equal(t, "studio recording", r.Disambiguation)
+
+    mbClient.AssertExpectations(t)
 }
 
 func TestService_Search_EmptyResults(t *testing.T) {
-    fake := &fakeMBClient{recordings: []musicbrainz.Recording{}}
-    svc := NewService(fake, zap.NewNop())
+    mbClient := new(mockMBClient)
+    mbClient.On("Search", mock.Anything, "Nonexistent Song", "No Artist").Return([]musicbrainz.Recording{}, nil)
+
+    svc := NewService(mbClient, zap.NewNop())
 
     results, err := svc.Search(context.Background(), "Nonexistent Song", "No Artist")
     require.NoError(t, err)
     assert.Empty(t, results)
+
+    mbClient.AssertExpectations(t)
 }
 
 func TestService_Search_PropagatesError(t *testing.T) {
-    fake := &fakeMBClient{err: errors.New("network error")}
-    svc := NewService(fake, zap.NewNop())
+    mbClient := new(mockMBClient)
+    mbClient.On("Search", mock.Anything, "Any Title", "Any Artist").Return(nil, errors.New("network error"))
+
+    svc := NewService(mbClient, zap.NewNop())
 
     _, err := svc.Search(context.Background(), "Any Title", "Any Artist")
     assert.Error(t, err)
+
+    mbClient.AssertExpectations(t)
 }
 ```
 
-The only change is `zap.NewNop()` as the second argument to `NewService`. The test behaviour and assertions are identical to before.
+The two changes from Part 5: `zap.NewNop()` as the second argument to `NewService`, and the hand-written fake replaced by a `testify/mock` struct. The test behaviour and assertions are identical to before.
 
 ---
 
