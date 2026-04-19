@@ -131,14 +131,11 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 		// Testcontainers rebuilds it every run; see section 9.10 for caching.
 		FromDockerfile: testcontainers.FromDockerfile{
 			Context:        projectRoot,
-			Dockerfile:     "e2e.Dockerfile",
+			Dockerfile:     "Dockerfile",
 			BuildLogWriter: os.Stderr, // set to os.Stderr to debug image build failures
-			// I had to set KeepImage to true to avoid docker creating a 2GB image on every E2E test
-			// run. Using `true` here forces us to run `docker rmi playlists-e2e:latest` every time
-			// I update the E2E's Dockerfile
-			KeepImage: true,
-			Repo:      "playlists-e2e",
-			Tag:       "latest",
+			KeepImage:      true,
+			Repo:           "playlists-e2e",
+			Tag:            "latest",
 		},
 		ExposedPorts: []string{"8080/tcp"},
 		Networks:     []string{networkName},
