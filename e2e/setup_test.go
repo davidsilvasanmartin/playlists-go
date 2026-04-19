@@ -1,9 +1,10 @@
+//go:build e2e
+
 package e2e
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,7 +71,7 @@ func TestMain(m *testing.M) {
 	appURL = fmt.Sprintf("http://%s:%s", host, port.Port())
 
 	// ── 5. Run all tests ──────────────────────────────────────────────────────
-	os.Exit(m.Run())
+	m.Run()
 }
 
 // startWireMock starts a WireMock container and returns:
@@ -81,7 +82,7 @@ func startWireMock(ctx context.Context, networkName, testdataDir string) (testco
 	filesDir := filepath.Join(testdataDir, "__files")
 
 	req := testcontainers.ContainerRequest{
-		Image:        "wiremock/wiremock:latest",
+		Image:        "wiremock/wiremock:3.13.2-2",
 		ExposedPorts: []string{"8080/tcp"},
 		Networks:     []string{networkName},
 		NetworkAliases: map[string][]string{
@@ -130,17 +131,27 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 		// Testcontainers rebuilds it every run; see section 9.10 for caching.
 		FromDockerfile: testcontainers.FromDockerfile{
 			Context:        projectRoot,
-			Dockerfile:     "Dockerfile",
-			BuildLogWriter: io.Discard, // set to os.Stderr to debug image build failures
-			KeepImage:      false,      // do not reuse between runs
+			Dockerfile:     "e2e.Dockerfile",
+			BuildLogWriter: os.Stderr, // set to os.Stderr to debug image build failures
+			// I had to set KeepImage to true to avoid docker creating a 2GB image on every E2E test
+			// run. Using `true` here forces us to run `docker rmi playlists-e2e:latest` every time
+			// I update the E2E's Dockerfile
+			KeepImage: true,
+			Repo:      "playlists-e2e",
+			Tag:       "latest",
 		},
 		ExposedPorts: []string{"8080/tcp"},
 		Networks:     []string{networkName},
 		Env: map[string]string{
 			"PLAYLISTS_MB_BASE_URL":   wiremockURL,
 			"PLAYLISTS_MB_USER_AGENT": "playlists-e2e/0.0.1 ( test@example.com )",
-			"PLAYLISTS_LOG_LEVEL":     "error", // suppress logs during tests
-			"PLAYLISTS_LOG_FORMAT":    "json",
+			"PLAYLISTS_LOG_LEVEL":     "debug", // change to "error" to suppress logs
+			"PLAYLISTS_LOG_FORMAT":    "dev",   // change to "json" for structured output
+		},
+		// Stream container logs to stderr so they appear in `go test -v` output.
+		// Remove LogConsumerCfg (or set Consumers to nil) once debugging is done.
+		LogConsumerCfg: &testcontainers.LogConsumerConfig{
+			Consumers: []testcontainers.LogConsumer{&testcontainers.StdoutLogConsumer{}},
 		},
 		WaitingFor: wait.ForHTTP("/api/v1/version").
 			WithPort("8080").

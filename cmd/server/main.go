@@ -44,6 +44,7 @@ func main() {
 		zap.String("port", port),
 		zap.String("logLevel", logLevel),
 		zap.String("logFormat", logFormat),
+		zap.String("version", version),
 	)
 
 	// -- dependencies ----------------

@@ -141,42 +141,54 @@ playlists/
 ## 9.6 WireMock YAML stubs
 
 ### What a stub file looks like
-
-```yaml
-# e2e/testdata/wiremock/mappings/mb-search-found.yaml
-request:
-  method: GET
-  urlPathPattern: /ws/2/recording
-  queryParameters:
-    query:
-      contains: "Bohemian Rhapsody"
-response:
-  status: 200
-  headers:
-    Content-Type: "application/json"
-  bodyFileName: mb-search-found.json   # served from __files/
+File e2e/testdata/wiremock/mappings/mb-search-found.json:
+```json
+{
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/ws/2/recording",
+    "queryParameters": {
+      "query": {
+        "contains": "Bohemian"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "bodyFileName": "mb-search-found.json"
+  }
+}
 ```
 
 When WireMock receives `GET /ws/2/recording?query=...Bohemian+Rhapsody...`, it returns HTTP 200 with the contents of `__files/mb-search-found.json` as the body.
 
-```yaml
-# e2e/testdata/wiremock/mappings/mb-search-unavailable.yaml
-request:
-  method: GET
-  urlPathPattern: /ws/2/recording
-  queryParameters:
-    query:
-      contains: "TRIGGER_503"
-response:
-  status: 503
+File e2e/testdata/wiremock/mappings/mb-search-unavailable.yaml:
+```json
+{
+  "request": {
+    "method": "GET",
+    "urlPathPattern": "/ws/2/recording",
+    "queryParameters": {
+      "query": {
+        "contains": "TRIGGER_503"
+      }
+    }
+  },
+  "response": {
+    "status": 503
+  }
+}
 ```
 
 For the "service unavailable" scenario, the test sends a request containing `TRIGGER_503` in the title. WireMock matches on that string and returns a 503 with no body. The app sees a 503 from its "MusicBrainz client" and maps it to its own 503 response — which is exactly what the test asserts.
 
 > **Why use special trigger strings?** WireMock matches on request content, not on "which test is calling." Since all tests share one running WireMock instance, the only way for a test to reliably get a specific response is to send a request that uniquely matches one stub. Using a recognisable trigger string like `TRIGGER_503` makes this intention obvious. The alternative — resetting and reconfiguring WireMock stubs between tests via its admin API — is possible but more complex.
 
+File e2e/testdata/wiremock/__files/mb-search-found.json:
 ```json
-// e2e/testdata/wiremock/__files/mb-search-found.json
 {
   "recordings": [
     {
@@ -476,6 +488,14 @@ func startWireMock(ctx context.Context, networkName, testdataDir string) (testco
     return c, internalURL, nil
 }
 
+// stdoutLogConsumer streams container log lines to stderr so they appear
+// in `go test -v` output. Attach it via LogConsumerCfg when debugging.
+type stdoutLogConsumer struct{}
+
+func (s *stdoutLogConsumer) Accept(l testcontainers.Log) {
+    fmt.Fprint(os.Stderr, string(l.Content))
+}
+
 // startApp builds the app Docker image from the project root Dockerfile and
 // starts it, pointed at the WireMock container for outbound MusicBrainz calls.
 func startApp(ctx context.Context, networkName, wiremockURL string) (testcontainers.Container, error) {
@@ -485,7 +505,7 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 
     req := testcontainers.ContainerRequest{
         // Build the image from the project Dockerfile.
-        // Testcontainers rebuilds it every run; see section 9.10 for caching.
+        // Testcontainers rebuilds it every run; see section 9.11 for caching.
         FromDockerfile: testcontainers.FromDockerfile{
             Context:        projectRoot,
             Dockerfile:     "Dockerfile",
@@ -495,10 +515,15 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
         ExposedPorts: []string{"8080/tcp"},
         Networks:     []string{networkName},
         Env: map[string]string{
-            "PLAYLISTS_MB_BASE_URL":  wiremockURL,
+            "PLAYLISTS_MB_BASE_URL":   wiremockURL,
             "PLAYLISTS_MB_USER_AGENT": "playlists-e2e/0.0.1 ( test@example.com )",
-            "PLAYLISTS_LOG_LEVEL":    "error", // suppress logs during tests
-            "PLAYLISTS_LOG_FORMAT":   "json",
+            "PLAYLISTS_LOG_LEVEL":     "debug", // change to "error" to suppress logs
+            "PLAYLISTS_LOG_FORMAT":    "dev",   // change to "json" for structured output
+        },
+        // Stream container logs to stderr so they appear in `go test -v` output.
+        // Remove LogConsumerCfg (or set Consumers to nil) once debugging is done.
+        LogConsumerCfg: &testcontainers.LogConsumerConfig{
+            Consumers: []testcontainers.LogConsumer{&stdoutLogConsumer{}},
         },
         WaitingFor: wait.ForHTTP("/api/v1/version").
             WithPort("8080").
@@ -517,6 +542,8 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 > **`NetworkAliases`** — within the Docker network, `wiremock` resolves to the WireMock container's IP. When the app container calls `http://wiremock:8080/ws/2/recording`, it reaches WireMock. This is the DNS resolution inside a Docker network, not the public internet.
 
 > **`WaitingFor`** — Testcontainers polls this condition before handing control back to your test code. For WireMock we wait for its `/__admin/health` endpoint to return 200. For the app we poll `/api/v1/version`, which is a dependency-free endpoint that always returns 200 — no WireMock interaction, no ambiguity about what status code to expect. This is why a `/version` (or `/health`) endpoint is worth adding to every service: it gives infrastructure tooling a clean, always-cheap liveness signal.
+
+> **`LogConsumerCfg` / debugging container logs** — Containers are short-lived: once `TestMain` exits they are torn down, and their logs are gone. `LogConsumerCfg` tells Testcontainers to stream log lines to your `Accept` method in real time, while the container is running. The `stdoutLogConsumer` above writes to `os.Stderr`, which `go test -v` prints to the terminal. Combined with `PLAYLISTS_LOG_LEVEL=debug` and `PLAYLISTS_LOG_FORMAT=dev`, you get coloured, human-readable log lines from inside the container interleaved with your test output — exactly what you need when a test fails and you cannot attach a debugger to a container. Once debugging is done, set the env vars back to `error` / `json` and remove `LogConsumerCfg` to keep test output clean.
 
 ### `e2e/search_test.go`
 
