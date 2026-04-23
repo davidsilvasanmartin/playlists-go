@@ -767,3 +767,224 @@ Run all four layers:
 Layers 1–3 give fast feedback during development. Layer 4 gives you confidence that the thing you ship actually works. They are complementary, not alternatives.
 
 If you only have bandwidth to implement one e2e layer right now, **start with Option A (Part 8)**. It gives you 80% of the value with 20% of the setup. Migrate to this approach (Part 9) when you have a `Dockerfile` ready and want CI parity.
+
+---
+
+## 9.15 Image management
+
+Running `make teste2e` repeatedly accumulates Docker images that show up as `<none>:<none>` in Docker Desktop. This section explains why it happens, what your options are, and which setup eliminates the problem.
+
+### 9.15.1 Why dangling images accumulate
+
+Docker image tags are mutable pointers. When you run `docker build -t playlists-e2e:latest .` twice, the second build produces a new image and moves the `playlists-e2e:latest` pointer to it. The old image still exists on disk — Docker never deletes data without being told to — but it now has no tag. It appears as `<none>:<none>`. This is called a **dangling image**.
+
+The current setup has three sources of dangling images:
+
+**1. The app image (`playlists-e2e:latest`)**
+`KeepImage: true` with `Repo: "playlists-e2e"` and `Tag: "latest"` tells Testcontainers to build and tag the image, then keep it after the run. On the next run it rebuilds and retags, orphaning the old image. One dangling image per run, every run.
+
+**2. The `golang:...` builder stage**
+Docker's BuildKit caches each `FROM` stage as an intermediate image. If the upstream tag is ever updated (a security patch is pushed under the same tag name), Docker detects the local cache is stale and pulls new layers. The old cached layers become dangling.
+
+**3. Multi-stage build intermediate layers**
+The `RUN go mod download` and `RUN go build` layers are cached by BuildKit as unnamed intermediate images. When source code changes invalidate a cache layer, BuildKit creates a new one and marks the old as eligible for pruning — but does not remove it immediately.
+
+Sources 2 and 3 only accumulate when the content changes. Source 1 is guaranteed to produce a dangling image on every run.
+
+### 9.15.2 Your four options
+
+#### Option 1 — `docker image prune` (reactive cleanup, zero effort)
+
+Add a prune step after the test run:
+
+```makefile
+teste2e:
+	go test -tags=e2e -v -count=1 -timeout=120s ./e2e/...
+	@docker image prune -f
+```
+
+`docker image prune -f` removes all dangling images system-wide. One line, no code changes. It does not prevent accumulation during the run — it cleans up after. It also removes dangling images from other projects on the same machine, which is usually acceptable.
+
+**Verdict:** Good enough for solo development. Falls short of preventing the problem.
+
+#### Option 2 — `KeepImage: false` (Testcontainers owns the lifecycle)
+
+Remove `KeepImage`, `Repo`, and `Tag` from the `FromDockerfile` block:
+
+```go
+FromDockerfile: testcontainers.FromDockerfile{
+    Context:        projectRoot,
+    Dockerfile:     "Dockerfile",
+    BuildLogWriter: os.Stderr,
+    KeepImage:      false, // Testcontainers deletes the image when the container terminates
+},
+```
+
+Testcontainers deletes the built image when it terminates the container. No dangling images, ever.
+
+The cost: the image is rebuilt from scratch on every `make teste2e`. On a cold machine with no build cache, that is 30–60 seconds before the first test runs. Acceptable when you are actively changing the `Dockerfile`; too slow as the default.
+
+**Verdict:** Cleanest lifecycle, but slow. Use during active Dockerfile development only.
+
+#### Option 3 — Explicit `docker rmi` before rebuild
+
+Remove the old image before rebuilding so Docker never orphans it:
+
+```makefile
+docker-build:
+	docker rmi playlists-e2e:latest 2>/dev/null || true
+	docker build -t playlists-e2e:latest .
+```
+
+Docker can only delete an image when no container is using it. If the previous test run's container was already terminated (which it will be, because `defer app.Terminate(ctx)` runs before `TestMain` returns), the `rmi` succeeds and the rebuild produces a clean image with no orphan.
+
+**Verdict:** Works, but a single shared `latest` tag still creates a subtle race if two machines or two CI jobs build concurrently.
+
+#### Option 4 — Pre-build with git SHA tags (recommended)
+
+Separate image building from test running. The Makefile builds the image; Testcontainers uses it. The image is tagged with the git commit SHA, so two consecutive builds produce two differently-named images — neither is orphaned.
+
+```makefile
+IMAGE_NAME := playlists-e2e
+IMAGE_TAG  := $(shell git rev-parse --short HEAD)
+IMAGE      := $(IMAGE_NAME):$(IMAGE_TAG)
+
+## docker-build: build the app image tagged with the current git SHA
+docker-build:
+	docker build -t $(IMAGE) -t $(IMAGE_NAME):latest .
+
+## teste2e: build the image then run e2e tests
+teste2e: docker-build
+	PLAYLISTS_E2E_IMAGE=$(IMAGE) \
+	go test -tags=e2e -v -count=1 -timeout=120s ./e2e/...
+	@docker image prune -f
+
+## docker-clean: remove all local playlists-e2e images
+docker-clean:
+	docker images $(IMAGE_NAME) -q | xargs -r docker rmi -f
+```
+
+`setup_test.go` — replace the `FromDockerfile` block with a plain `Image` field:
+
+```go
+func startApp(ctx context.Context, networkName, wiremockURL string) (testcontainers.Container, error) {
+    image := os.Getenv("PLAYLISTS_E2E_IMAGE")
+    if image == "" {
+        image = "playlists-e2e:latest" // fallback for running go test directly
+    }
+
+    req := testcontainers.ContainerRequest{
+        Image:        image,
+        ExposedPorts: []string{"8080/tcp"},
+        Networks:     []string{networkName},
+        Env: map[string]string{
+            "PLAYLISTS_MB_BASE_URL":   wiremockURL,
+            "PLAYLISTS_MB_USER_AGENT": "playlists-e2e/0.0.1 ( test@example.com )",
+            "PLAYLISTS_LOG_LEVEL":     "debug",
+            "PLAYLISTS_LOG_FORMAT":    "dev",
+        },
+        LogConsumerCfg: &testcontainers.LogConsumerConfig{
+            Consumers: []testcontainers.LogConsumer{&testcontainers.StdoutLogConsumer{}},
+        },
+        WaitingFor: wait.ForHTTP("/api/v1/version").
+            WithPort("8080").
+            WithStartupTimeout(60 * time.Second),
+    }
+
+    return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+        ContainerRequest: req,
+        Started:          true,
+    })
+}
+```
+
+Why git SHA tags prevent dangling:
+- Build 1 produces `playlists-e2e:a1b2c3d` and `playlists-e2e:latest`.
+- Build 2 produces `playlists-e2e:e4f5g6h` and moves `playlists-e2e:latest` to the new image.
+- `playlists-e2e:a1b2c3d` still has its SHA tag — it is not dangling. `playlists-e2e:latest` loses its pointer and becomes dangling, but `docker image prune -f` at the end of `teste2e` removes it.
+- SHA-tagged images accumulate over time with proper names. `make docker-clean` removes all of them when you want to reclaim disk space.
+
+**Verdict:** This is the industry standard. It mirrors exactly how CI/CD pipelines tag images (git SHA or build number), eliminates dangling images, enables parallel builds without tag conflicts, and makes image provenance traceable via `docker inspect`.
+
+### 9.15.3 Should base images be pinned to a SHA digest?
+
+**Yes.** This is the answer to the TODO in `setup_test.go`.
+
+A tag like `golang:1.26.2-trixie` looks specific but is not immutable. Maintainers regularly push updated images under the same tag to apply OS-level security patches. When that happens:
+
+- Docker detects the local cache is stale on the next pull.
+- New layers are downloaded; old cached layers lose their reference and become dangling.
+- Your build now uses different OS packages than last week, with no record in git.
+
+A SHA digest (`@sha256:...`) is a cryptographic hash of the image manifest. It is immutable — the same digest always refers to the same bits, on any machine, at any point in time.
+
+#### How to pin
+
+First, pull the image and read its digest:
+
+```bash
+docker pull golang:1.26.2-trixie
+docker inspect --format='{{index .RepoDigests 0}}' golang:1.26.2-trixie
+# golang@sha256:<digest>
+
+docker pull debian:trixie-20260406-slim
+docker inspect --format='{{index .RepoDigests 0}}' debian:trixie-20260406-slim
+# debian@sha256:<digest>
+```
+
+Then update the `Dockerfile` — keep the human-readable tag as documentation, add the digest as the binding constraint:
+
+```dockerfile
+FROM golang:1.26.2-trixie@sha256:<digest> AS builder
+# ...
+FROM debian:trixie-20260406-slim@sha256:<digest>
+```
+
+Docker uses the digest; the tag is a comment for humans.
+
+Do the same for the WireMock image in `setup_test.go`:
+
+```bash
+docker pull wiremock/wiremock:3.13.2-2
+docker inspect --format='{{index .RepoDigests 0}}' wiremock/wiremock:3.13.2-2
+# wiremock/wiremock@sha256:<digest>
+```
+
+```go
+Image: "wiremock/wiremock:3.13.2-2@sha256:<digest>",
+```
+
+#### How to update pinned digests
+
+When you want a newer base image (a security update, a new Go version), the process is deliberate:
+
+```bash
+docker pull golang:1.27-trixie
+docker inspect --format='{{index .RepoDigests 0}}' golang:1.27-trixie
+# update Dockerfile, commit the change
+```
+
+The explicit update is a recorded decision in git history. Without pinning, updates happen silently on whichever machine happens to pull first.
+
+#### Effects on dangling images
+
+Once the `FROM` digests in your `Dockerfile` are pinned, Docker never pulls a different image for those layers unless you change the digest. Old base image layers never become dangling because Docker never replaces them. This eliminates sources 2 and 3 from section 9.15.1.
+
+### 9.15.4 Recommended setup (summary)
+
+Apply all three changes together:
+
+| What | Change | Effect |
+|---|---|---|
+| `Dockerfile` | Pin `FROM` lines to `@sha256:` digests | Eliminates dangling base image layers |
+| `setup_test.go` | Replace `FromDockerfile` with `Image` from env var | Eliminates per-run image rebuilds in test code |
+| `Makefile` | Pre-build with git SHA tag; `docker image prune -f` after tests | Eliminates dangling `latest` tags; SHA tags are never orphaned |
+| `setup_test.go` | Add `@sha256:` digest to WireMock image string | Pins WireMock to an immutable version |
+
+After this change, `make teste2e` will:
+
+1. Build `playlists-e2e:<git-sha>` and `playlists-e2e:latest` (docker build, uses layer cache — fast after the first run).
+2. Run the tests against `playlists-e2e:<git-sha>`.
+3. Prune any remaining dangling images (typically just `playlists-e2e:latest` from the previous run).
+
+The only images that accumulate over time are the SHA-tagged ones, each clearly named after the commit that produced them. `make docker-clean` removes them all when you want the disk space back.
