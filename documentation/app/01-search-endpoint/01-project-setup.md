@@ -203,4 +203,4 @@ The configuration story for self-hosted users is: edit `.env` (or the `environme
 
 ---
 
-Continue to [Part 2 — MusicBrainz Client](./02-musicbrainz-client.md).
+Continue to [Part 2 — MusicBrainz Client](02-musicbrainz-client.md).

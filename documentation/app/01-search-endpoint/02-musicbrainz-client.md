@@ -229,4 +229,4 @@ func withRetry(ctx context.Context, maxAttempts int, delay time.Duration, fn fun
 
 ---
 
-Continue to [Part 3 — Search Module](./03-search-module.md).
+Continue to [Part 3 — Search Module](03-search-module.md).

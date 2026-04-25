@@ -171,4 +171,4 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, message stri
 
 ---
 
-Continue to [Part 4 — Wiring](./04-wiring.md).
+Continue to [Part 4 — Wiring](04-wiring.md).
