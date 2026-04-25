@@ -708,31 +708,12 @@ Migration file naming: `00001_create_songs.sql`, `00002_create_genres.sql`, etc.
 
 ---
 
-### 4.7 OpenAPI documentation
-
-Go does not have Spring's annotation-driven OpenAPI generation. Two practical options:
-
-**Option A — Write the OpenAPI spec by hand** (recommended to start with): maintain an `openapi.yaml` at the project
-root. Serve it from a `GET /api/v1/openapi.yaml` endpoint. Use the
-[Swagger UI Docker image](https://hub.docker.com/r/swaggerapi/swagger-ui) in `docker-compose.yml` to render it
-locally. This is the simplest approach and keeps the spec as a first-class artefact.
-
-**Option B — Generate from code comments** using [`swaggo/swag`](https://github.com/swaggo/swag): annotate handlers
-with special comments and run `swag init` to generate the spec. More automation, but the comment syntax is verbose and
-the generated spec is sometimes imprecise.
-
-**Recommendation:** start with Option A. The API surface is small, and a hand-written spec is easier to keep accurate
-and review in PRs.
-
----
-
 ### 4.8 Testing strategy
 
-| Layer              | Tool                                               | Notes                                                                              |
-|--------------------|----------------------------------------------------|------------------------------------------------------------------------------------|
-| Unit tests         | Go standard `testing` package + `testify/assert`   | Pure Go, no Docker. For services (mock the repository interface), client logic.    |
-| Integration tests  | `testcontainers-go` + `net/http` client            | Real HTTP, real Postgres in Docker, real app binary. MusicBrainz mocked.           |
-| MusicBrainz mock   | `net/http/httptest.NewServer`                      | Simple in-process HTTP server serving canned JSON responses. No external process.  |
+| Layer      | Tool                                                 | Notes                                                                           |
+|------------|------------------------------------------------------|---------------------------------------------------------------------------------|
+| Unit tests | Go standard `testing` package + `testify/assert`     | Pure Go, no Docker. For services (mock the repository interface), client logic. |
+| E2E tests  | `testcontainers-go` + `wiremock` + `net/http` client | Real HTTP, real Postgres in Docker, real app binary. MusicBrainz mocked.        |
 
 #### Unit tests
 
@@ -741,44 +722,35 @@ and review in PRs.
 - Test the rate limiter and retry logic by injecting a fake HTTP server that returns 429 or errors.
 - File naming convention: `*_test.go` in the same package (white-box) or a `_test` package suffix (black-box).
 
-#### Integration tests
+#### E2E tests
 
-- A `TestMain` function in a `_integration_test.go` file (or a separate `_test` build tag) starts:
-  1. A PostgreSQL container via `testcontainers-go`.
-  2. A fake MusicBrainz HTTP server via `httptest.NewServer`.
-  3. The real application binary pointed at the test database and fake MB server.
+- A separate `e2e` directory for Wiremock configuration and Go test files (which have tag `//go:build e2e`).
 - Tests send real HTTP requests using `net/http` and assert on the JSON response.
-- Seed data: plain SQL `INSERT` statements run via `pgx` in `TestMain` or per-test setup functions.
-- Build tag `//go:build integration` (or `!unit`) keeps integration tests out of `go test ./...` by default; run
-  explicitly with `go test -tags=integration ./...`.
+- Seed data: plain SQL `INSERT` statements read from files (To Be Determined).
 
 **`testcontainers-go`** spins up a real PostgreSQL Docker container, runs Goose migrations, and provides the
-connection string to the app. The container is torn down after the test suite completes.
-
-**`httptest.NewServer`** as the MusicBrainz mock is idiomatic Go: it's in the standard library, starts in
-milliseconds, and you can vary responses per test by swapping the handler.
+connection string to the app. The app is to be run on a different container, from image tagged `playlists-e2e:latest`.
+The container is torn down after the test suite completes.
 
 ---
 
 ### 4.9 Recommended technologies
 
-| Concern            | Technology                                    | Rationale                                                                 |
-|--------------------|-----------------------------------------------|---------------------------------------------------------------------------|
-| HTTP server        | `net/http` (Go stdlib, 1.22+)                 | Path params built in; no dependency; sufficient for this API              |
-| HTTP client        | `net/http` (Go stdlib)                        | Standard; configure timeout via `http.Client{Timeout: 10*time.Second}`    |
-| Database driver    | `pgx/v5` (`github.com/jackc/pgx/v5`)          | Best-in-class PostgreSQL driver for Go; used by sqlc                      |
-| Connection pool    | `pgxpool` (bundled with pgx/v5)               | Built-in pool; pass to sqlc-generated `*Queries`                          |
-| SQL queries        | `sqlc`                                        | Type-safe, compile-time checked; no ORM magic                             |
-| Migrations         | Goose                                         | SQL-first migrations with embedded Go API for startup runs                |
-| Rate limiting      | `golang.org/x/time/rate`                      | Go team's token-bucket implementation; `limiter.Wait(ctx)` blocks cleanly |
-| Retry              | Hand-rolled helper (15 lines)                 | No dependency; trivially testable; sufficient for 2 retries               |
-| JSON               | `encoding/json` (Go stdlib)                   | Standard; no extra dependency                                             |
-| Validation         | Manual checks in handlers                     | Sufficient for small input surface; add `go-playground/validator` later   |
-| Config             | `os.Getenv` / `godotenv`                      | Read `DATABASE_URL`, `PORT`, `MB_BASE_URL` from environment               |
-| Testing assertions | `testify/assert` + `testify/mock`             | Standard Go testing helper; lightweight                                   |
-| Integration tests  | `testcontainers-go`                           | Spins up real Postgres in Docker per test run                             |
-| MB mock in tests   | `net/http/httptest` (Go stdlib)               | In-process HTTP server; no external process required                      |
-| OpenAPI docs       | Hand-written `openapi.yaml` + Swagger UI      | Simple, accurate, reviewable                                              |
+| Concern            | Technology                           | Rationale                                                                 |
+|--------------------|--------------------------------------|---------------------------------------------------------------------------|
+| HTTP server        | `net/http` (Go stdlib, 1.22+)        | Path params built in; no dependency; sufficient for this API              |
+| HTTP client        | `net/http` (Go stdlib)               | Standard; configure timeout via `http.Client{Timeout: 10*time.Second}`    |
+| Database driver    | `pgx/v5` (`github.com/jackc/pgx/v5`) | Best-in-class PostgreSQL driver for Go; used by sqlc                      |
+| Connection pool    | `pgxpool` (bundled with pgx/v5)      | Built-in pool; pass to sqlc-generated `*Queries`                          |
+| SQL queries        | `sqlc`                               | Type-safe, compile-time checked; no ORM magic                             |
+| Migrations         | Goose                                | SQL-first migrations with embedded Go API for startup runs                |
+| Rate limiting      | `golang.org/x/time/rate`             | Go team's token-bucket implementation; `limiter.Wait(ctx)` blocks cleanly |
+| Retry              | Hand-rolled helper (15 lines)        | No dependency; trivially testable; sufficient for 2 retries               |
+| JSON               | `encoding/json` (Go stdlib)          | Standard; no extra dependency                                             |
+| Validation         | Manual checks in handlers            | Sufficient for small input surface; add `go-playground/validator` later   |
+| Config             | `os.Getenv`                          | Read `DATABASE_URL`, `PORT`, `MB_BASE_URL` from environment               |
+| Testing assertions | `testify/assert` + `testify/mock`    | Standard Go testing helper; lightweight                                   |
+| E2E tests          | `testcontainers-go` + `Wiremock`     | Spins up real Postgres in Docker per test run                             |
 
 **Not recommended:**
 
@@ -801,12 +773,12 @@ Local development database (`docker-compose.yml`):
 
 Configuration is passed via environment variables (no YAML config files):
 
-| Variable        | Default             | Description                        |
-|-----------------|---------------------|------------------------------------|
-| `DATABASE_URL`  | (required)          | `postgres://playlists:playlists@localhost:5432/playlists` |
-| `PORT`          | `8080`              | HTTP listen port                   |
-| `MB_BASE_URL`   | `https://musicbrainz.org` | Override for tests              |
-| `MB_USER_AGENT` | (required)          | e.g. `playlists/0.0.1 ( me@example.com )` |
+| Variable        | Default                   | Description                                               |
+|-----------------|---------------------------|-----------------------------------------------------------|
+| `DATABASE_URL`  | (required)                | `postgres://playlists:playlists@localhost:5432/playlists` |
+| `PORT`          | `8080`                    | HTTP listen port                                          |
+| `MB_BASE_URL`   | `https://musicbrainz.org` | Override for tests                                        |
+| `MB_USER_AGENT` | (required)                | e.g. `playlists/0.0.1 ( me@example.com )`                 |
 
 Startup sequence in `main.go`:
 
@@ -821,18 +793,17 @@ Startup sequence in `main.go`:
 
 ## 5. Decisions Log
 
-| Decision                  | Choice                                                     | Rationale                                                                                                                          |
-|---------------------------|------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| Search endpoint verb      | `GET` with query params                                    | Idempotent, cacheable, semantically correct for a read                                                                             |
-| Song persistence trigger  | Re-fetch full details via lookup on `POST /api/v1/songs`   | Search results are abbreviated; lookup gives authoritative data including genres                                                   |
-| `disambiguation` field    | Included                                                   | Critical for distinguishing studio vs. live vs. alternate versions                                                                 |
-| Genres                    | From day one via lookup `inc=genres`                       | Required for smart playlist `GENRE` criterion; fetched during catalog add                                                          |
-| Playlist schema           | Single `playlists` table with type discriminator           | One table for listings; avoids UNION; type enforced by application logic                                                           |
-| Rate limiting library     | `golang.org/x/time/rate`                                   | Go team's canonical token-bucket; `limiter.Wait(ctx)` is idiomatic and context-aware                                              |
-| Retry                     | Hand-rolled helper                                         | 15-line function; no dependency; trivially testable; no need for a library at this scale                                           |
-| HTTP router               | Go stdlib `net/http` (1.22+)                               | Path params built in since Go 1.22; no framework needed for this API size                                                         |
-| ORM / query layer         | sqlc + pgx/v5                                              | Type-safe queries without reflection; errors caught at `sqlc generate` time, not runtime                                           |
-| Smart playlist queries    | Hand-built parameterised SQL in a query builder            | sqlc static queries cannot express runtime-variable WHERE clauses; a small builder is the correct Go approach                     |
-| OpenAPI docs              | Hand-written `openapi.yaml` + Swagger UI Docker image      | Simplest accurate approach; spec is a first-class reviewable artefact                                                              |
-| Integration test DB mock  | `testcontainers-go` (real Postgres)                        | Tests against real SQL dialect and constraints; no mock/prod divergence risk                                                       |
-| MusicBrainz mock in tests | `net/http/httptest.NewServer`                              | Standard library; in-process; no external process; responses vary per test by swapping handler                                    |
+| Decision                  | Choice                                                   | Rationale                                                                                                     |
+|---------------------------|----------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Search endpoint verb      | `GET` with query params                                  | Idempotent, cacheable, semantically correct for a read                                                        |
+| Song persistence trigger  | Re-fetch full details via lookup on `POST /api/v1/songs` | Search results are abbreviated; lookup gives authoritative data including genres                              |
+| `disambiguation` field    | Included                                                 | Critical for distinguishing studio vs. live vs. alternate versions                                            |
+| Genres                    | From day one via lookup `inc=genres`                     | Required for smart playlist `GENRE` criterion; fetched during catalog add                                     |
+| Playlist schema           | Single `playlists` table with type discriminator         | One table for listings; avoids UNION; type enforced by application logic                                      |
+| Rate limiting library     | `golang.org/x/time/rate`                                 | Go team's canonical token-bucket; `limiter.Wait(ctx)` is idiomatic and context-aware                          |
+| Retry                     | Hand-rolled helper                                       | 15-line function; no dependency; trivially testable; no need for a library at this scale                      |
+| HTTP router               | Go stdlib `net/http` (1.22+)                             | Path params built in since Go 1.22; no framework needed for this API size                                     |
+| ORM / query layer         | sqlc + pgx/v5                                            | Type-safe queries without reflection; errors caught at `sqlc generate` time, not runtime                      |
+| Smart playlist queries    | Hand-built parameterised SQL in a query builder          | sqlc static queries cannot express runtime-variable WHERE clauses; a small builder is the correct Go approach |
+| E2E test DB mock          | `testcontainers-go` (real Postgres)                      | Tests against real SQL dialect and constraints; no mock/prod divergence risk                                  |
+| MusicBrainz mock in tests | `Wiremock` container                                     | Tests real HTTP requests                                                                                      |
