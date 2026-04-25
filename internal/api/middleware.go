@@ -24,15 +24,6 @@ func (sr *statusRecorder) WriteHeader(status int) {
 }
 
 // LoggingMiddleware returns middleware that logs one structured line per request.
-//
-// It logs: HTTP method, URL path, response status, elapsed time, and the
-// client's remote address.
-//
-// Usage:
-//
-//	mux := http.NewServeMux()
-//	// ... register routes ...
-//	return LoggingMiddleware(logger)(mux)
 func LoggingMiddleware(logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

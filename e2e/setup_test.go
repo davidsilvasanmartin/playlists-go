@@ -16,7 +16,6 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// TODO PIN IMAGES TO A SHA, so that Docker does not download too many of them into my laptop
 // TODO find out how to debug
 
 // appURL is the base URL of the app container. Set once in TestMain, read by all tests
@@ -82,7 +81,7 @@ func startWireMock(ctx context.Context, networkName, testdataDir string) (testco
 	filesDir := filepath.Join(testdataDir, "__files")
 
 	req := testcontainers.ContainerRequest{
-		Image:        "wiremock/wiremock:3.13.2-2",
+		Image:        "wiremock/wiremock:3.13.3-2@sha256:fd27e46090916e85326229e5102ee169ae729059f3374549615bd20a35fee1f2",
 		ExposedPorts: []string{"8080/tcp"},
 		Networks:     []string{networkName},
 		NetworkAliases: map[string][]string{
@@ -119,8 +118,8 @@ func startWireMock(ctx context.Context, networkName, testdataDir string) (testco
 	return c, internalURL, nil
 }
 
-// startApp builds the app Docker image from the project root Dockerfile and
-// starts it, pointed at the WireMock container for outbound MusicBrainz calls.
+// startApp starts the pre-built app image, pointed at the WireMock container
+// for outbound MusicBrainz calls
 func startApp(ctx context.Context, networkName, wiremockURL string) (testcontainers.Container, error) {
 	// Walk up from e2e/ to the project root where the Dockerfile lives.
 	_, thisFile, _, _ := runtime.Caller(0)
@@ -128,12 +127,12 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 
 	req := testcontainers.ContainerRequest{
 		// Build the image from the project Dockerfile.
-		// Testcontainers rebuilds it every run; see section 9.10 for caching.
+		// Testcontainers rebuilds it every run
 		FromDockerfile: testcontainers.FromDockerfile{
 			Context:        projectRoot,
 			Dockerfile:     "Dockerfile",
 			BuildLogWriter: os.Stderr, // set to os.Stderr to debug image build failures
-			KeepImage:      true,
+			KeepImage:      false,
 			Repo:           "playlists-e2e",
 			Tag:            "latest",
 		},
