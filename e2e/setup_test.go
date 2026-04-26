@@ -139,6 +139,7 @@ func startApp(ctx context.Context, networkName, wiremockURL string) (testcontain
 		ExposedPorts: []string{"8080/tcp"},
 		Networks:     []string{networkName},
 		Env: map[string]string{
+			"PLAYLISTS_PORT":          "8080",
 			"PLAYLISTS_MB_BASE_URL":   wiremockURL,
 			"PLAYLISTS_MB_USER_AGENT": "playlists-e2e/0.0.1 ( test@example.com )",
 			"PLAYLISTS_LOG_LEVEL":     "debug", // change to "error" to suppress logs

@@ -2,6 +2,17 @@
 
 ---
 
+## 0. Main project guidelines
+
+These guidelines are an absolute must and non-negotiable.
+- DEVELOPMENT EXCELLENCE.
+- SOLID PRINCIPLES.
+- EASINESS OF UNDERSTANDING.
+- TESTABILITY.
+- IDIOMATIC GO.
+- INDUSTRY STANDARDS.
+- EFFORTLESS DEPLOYMENT AND MAINTENACE.
+
 ## 1. User Experience Review
 
 ### The two-page model (Explore + Playlists)

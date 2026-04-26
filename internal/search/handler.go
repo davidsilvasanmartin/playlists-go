@@ -1,10 +1,9 @@
 package search
 
 import (
-	"encoding/json"
 	"net/http"
-	"time"
 
+	"github.com/davidsilvasanmartin/playlists-go/internal/httputil"
 	"go.uber.org/zap"
 )
 
@@ -26,55 +25,26 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		h.logger.Debug("validation failed: title too short",
 			zap.String("title", title),
 		)
-		writeError(w, r, http.StatusBadRequest, "Field 'title' must be at least 2 characters")
+		httputil.WriteError(w, r, http.StatusBadRequest, "Field 'title' must be at least 2 characters")
 		return
 	}
 	if len(artist) < 2 {
 		h.logger.Debug("validation failed: artist too short",
 			zap.String("artist", artist),
 		)
-		writeError(w, r, http.StatusBadRequest, "Field 'artist' must be at least 2 characters")
+		httputil.WriteError(w, r, http.StatusBadRequest, "Field 'artist' must be at least 2 characters")
 		return
 	}
 
 	results, err := h.service.Search(r.Context(), title, artist)
 	if err == nil {
-		writeJSON(w, http.StatusOK, Response{Results: results})
+		httputil.WriteJSON(w, http.StatusOK, Response{Results: results})
 	} else {
 		h.logger.Error("search service error",
 			zap.String("title", title),
 			zap.String("artist", artist),
 			zap.Error(err),
 		)
-		writeError(w, r, http.StatusServiceUnavailable, "MusicBrainz API is currently unreachable. Please try again later")
+		httputil.WriteError(w, r, http.StatusServiceUnavailable, "MusicBrainz API is currently unreachable. Please try again later")
 	}
-}
-
-// RESPONSE HELPERS
-// These can't live in internal/api because internal/api imports internal/search,
-// and we don't want to create a circular dependency. We'll move these shared
-// utilities somewhere else later such as in an internal/httputil package
-
-type apiError struct {
-	Timestamp string `json:"timestamp"`
-	Status    int    `json:"status"`
-	Error     string `json:"error"`
-	Message   string `json:"message"`
-	Path      string `json:"path"`
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
-	writeJSON(w, status, apiError{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Status:    status,
-		Error:     http.StatusText(status),
-		Message:   message,
-		Path:      r.URL.Path,
-	})
 }

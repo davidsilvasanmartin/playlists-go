@@ -29,7 +29,7 @@ func (s *service) Search(ctx context.Context, title string, artist string) ([]Re
 
 	recordings, err := s.mb.Search(ctx, title, artist)
 	if err != nil {
-		s.logger.Error("MusicBrainz client returned an error",
+		s.logger.Debug("MusicBrainz client returned an error",
 			zap.String("title", title),
 			zap.String("artist", artist),
 			zap.Error(err),

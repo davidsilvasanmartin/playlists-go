@@ -3,12 +3,11 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/davidsilvasanmartin/playlists-go/internal/api"
+	"github.com/davidsilvasanmartin/playlists-go/internal/config"
 	"github.com/davidsilvasanmartin/playlists-go/internal/musicbrainz"
 	"github.com/davidsilvasanmartin/playlists-go/internal/search"
-	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -19,21 +18,13 @@ var version = "dev"
 
 func main() {
 	// -- config ----------------
-	// Load committed defaults first, then let .env override personal values
-	// Both files are optional - errors are silently discarded
-	// In Docker neither file exists; env vars are injected by the container runtime
-	_ = godotenv.Load(".development.env")
-	_ = godotenv.Overload(".env")
-
-	// TODO we are setting defaults here which we may forget about; maybe it's better to just use Viper
-	port := getEnv("PLAYLISTS_PORT", "8080")
-	mbBaseURL := getEnv("PLAYLISTS_MB_BASE_URL", "https://musicbrainz.org")
-	mbUserAgent := mustGetEnv("PLAYLISTS_MB_USER_AGENT")
-	logLevel := getEnv("PLAYLISTS_LOG_LEVEL", "info")
-	logFormat := getEnv("PLAYLISTS_LOG_FORMAT", "json")
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// -- logger ----------------
-	logger, err := buildLogger(logLevel, logFormat)
+	logger, err := buildLogger(cfg.LogLevel, cfg.LogFormat)
 	if err != nil {
 		log.Fatalf("failed to build logger: %v", err)
 	}
@@ -41,14 +32,14 @@ func main() {
 	// This is important in production to avoid losing the last few log lines
 	defer logger.Sync()
 	logger.Info("starting server",
-		zap.String("port", port),
-		zap.String("logLevel", logLevel),
-		zap.String("logFormat", logFormat),
+		zap.String("port", cfg.Port),
+		zap.String("logLevel", cfg.LogLevel),
+		zap.String("logFormat", cfg.LogFormat),
 		zap.String("version", version),
 	)
 
 	// -- dependencies ----------------
-	mbClient := musicbrainz.NewClient(mbBaseURL, mbUserAgent, logger)
+	mbClient := musicbrainz.NewClient(cfg.MBBaseURL, cfg.MBUserAgent, logger)
 	searchService := search.NewService(mbClient, logger)
 	searchHandler := search.NewHandler(searchService, logger)
 
@@ -56,28 +47,11 @@ func main() {
 	mux := api.NewRouter(logger, searchHandler, version)
 
 	// -- server ----------------
-	addr := ":" + port
+	addr := ":" + cfg.Port
 	logger.Info("server ready", zap.String("addr", addr))
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		logger.Fatal("server error", zap.Error(err))
 	}
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-// mustGetEnv returns the value of an environment variable. If the variable is
-// not set, or if it is set but empty, it will cause the program to crash
-func mustGetEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		log.Fatalf("required environment variable %q is not set", key)
-	}
-	return v
 }
 
 // buildLogger creates a *zap.Logger configured from environment variables
